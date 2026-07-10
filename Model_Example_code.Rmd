@@ -1,0 +1,134 @@
+---
+title: "Model_example_code"
+author: "Elliot Stanton"
+date: "2026-07-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(naniar)
+library(brms)
+options(mc.cores = 16, brms.backend = "cmdstanr") # allows threading
+
+dummy_AMR_data <- readRDS("dummy_AMR_data.rds")
+```
+
+
+# Function for building model formula
+```{R}
+make_formula_poisson_var <- function(rf_formula){
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(interaction),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf(paste("interaction ~ ", as.character(rf_formula)))
+  
+  return(model_formula)
+}
+```
+
+### priors
+```{R}
+
+priors <- c(set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'), 
+                           set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+                           set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction', group = 'assay'), 
+                           set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'))
+
+```
+
+### make model formula
+```{R}
+# full model - includes group effects for: 
+# assay (pair of plain and am added), 
+# farm, 
+# location (nested in farm within data)
+# population effects include:
+# tensor product smooth for temperature, humidity, 
+# TP spline for Day of the year
+
+full_spline_formula <- 't2(mean_week_temperature_S, mean_week_humidity_S, bs = "tp")'
+
+full_model_formula <- 
+  make_formula_poisson_var(
+    paste0(
+      full_spline_formula, 
+      ' + s(day_of_study_S, bs ="tp") + 
+      (1|location_id) + 
+      (1|farm) + 
+      (1|assay)'
+      )
+    )
+
+full_model_formula
+```
+
+### run example model
+```{R}
+dummy_model <- brm(
+  formula = full_model_formula,
+  data = dummy_AMR_data, 
+  family = poisson(link = "log"), 
+  prior = priors,
+  threads = threading(4),
+  warmup = 2000, iter = 4000, chains = 4, cores=4,
+  silent = FALSE)
+
+summary(dummy_model)
+```
+
+### extract proportion of AMR E. coli draws, 
+### example plot showing posterior draws for samples with observed proportions
+### of AMR E. coli. 
+```{R}
+library(ggdist)
+library(forcats)
+
+dummy_model <- readRDS("dummy_model.rds")
+
+propres_posterior <- as_tibble(
+  inv_logit_scaled(fitted(dummy_model,
+                           re_formula = NULL,
+                           nlpar = 'interaction',
+                           summary = FALSE)))
+
+colnames(propres_posterior) <- dummy_AMR_data$assay
+
+### keep only unique
+propres_posterior <- propres_posterior %>%
+  select(0:135)
+
+### select three samples at random
+random_selection <- t(propres_posterior) %>%
+  as_tibble(rownames = "assay") %>%
+  slice_sample(n = 20) %>%
+  pivot_longer(cols = -assay) %>%
+  select(-name)
+
+### get observed propres for selected isolates (am count/no am count)
+obs_propres <- dummy_AMR_data %>%
+  filter(assay %in% random_selection$assay) %>%
+  mutate(count = count/exp(log_dilution)) %>%
+  select(assay, count, am) %>%
+  pivot_wider(names_from = am, values_from = count) %>%
+  mutate(propres = `1`/`0`) %>% 
+  select(-`0`, -`1`)
+
+random_selection %>%
+  left_join(obs_propres) %>%
+  ggplot(aes(x = value * 100, 
+             y = fct_reorder(assay, value, .fun = median))) +
+  stat_halfeye(aes(fill = assay), 
+               .width = c(0.66, 0.95),  # inner/outer interval widths
+               point_interval = "median_qi",
+               alpha = 0.8) +
+  geom_point(data = obs_propres, 
+             aes(x = propres * 100, y = assay),
+             color = "red", size = 4, shape = 16, alpha = 0.8) +
+  scale_x_continuous(transform = "log10") +
+  labs(y = NULL, x = "Percentage resistant") +
+  theme_minimal() + 
+  theme(legend.position = "none")
+
+```

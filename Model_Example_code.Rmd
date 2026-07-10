@@ -8,7 +8,6 @@ output: html_document
 ```{r setup, include=FALSE}
 library(tidyverse)
 library(brms)
-options(mc.cores = 16, brms.backend = "cmdstanr") # allows threading
 
 dummy_AMR_data <- readRDS("dummy_AMR_data.rds")
 ```
@@ -70,7 +69,6 @@ dummy_model <- brm(
   data = dummy_AMR_data, 
   family = poisson(link = "log"), 
   prior = priors,
-  threads = threading(4),
   warmup = 2000, iter = 4000, chains = 4, cores=4,
   silent = FALSE)
 
